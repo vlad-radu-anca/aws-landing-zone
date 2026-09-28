@@ -1,0 +1,27 @@
+# Terraform
+**/.terraform/
+
+# Lock files are committed for the root configurations (bootstrap/, live/), so
+# a deploy resolves the same provider versions every time. They are ignored for
+# the reusable modules, whose callers own provider selection.
+modules/**/.terraform.lock.hcl
+policies/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+*.tfvars
+!*.auto.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
