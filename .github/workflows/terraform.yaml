@@ -1,0 +1,146 @@
+name: Terraform
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# OIDC federation: GitHub mints a short-lived token that AWS trusts, so the
+# repository never holds long-lived access keys.
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  TF_VERSION: "1.10.5"
+  AWS_REGION: eu-central-1
+
+jobs:
+  validate:
+    name: validate (${{ matrix.dir }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir:
+          - bootstrap
+          - live/organization
+          - modules/organization
+          - modules/scp
+          - policies
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate -no-color
+
+  lint:
+    name: tflint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: terraform-linters/setup-tflint@v6
+        with:
+          tflint_version: latest
+      - run: tflint --init
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: tflint --recursive --format compact --minimum-failure-severity=error
+
+  security:
+    name: trivy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+
+  plan:
+    name: plan (live/organization)
+    needs: [validate, lint]
+    runs-on: ubuntu-latest
+    # Only runs when the repository has the deployment role configured. Without
+    # it the workflow still validates, so a fork or a fresh clone stays green.
+    if: vars.AWS_PLAN_ROLE_ARN != ''
+    defaults:
+      run:
+        working-directory: live/organization
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Assume the read-only plan role
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-landing-zone-plan
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - run: terraform init -backend-config=backend.hcl -input=false
+
+      - name: Plan
+        id: plan
+        run: terraform plan -no-color -input=false -lock=false -out=tfplan
+        continue-on-error: true
+
+      - name: Comment the plan on the pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v8
+        env:
+          PLAN: ${{ steps.plan.outputs.stdout }}
+        with:
+          script: |
+            const plan = (process.env.PLAN || '').slice(0, 60000)
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `#### Terraform plan \`${{ steps.plan.outcome }}\`\n\n<details><summary>Show plan</summary>\n\n\`\`\`terraform\n${plan}\n\`\`\`\n\n</details>`,
+            })
+
+      - name: Fail if the plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  apply:
+    name: apply (live/organization)
+    needs: plan
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.AWS_APPLY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    # A protected environment turns the apply into a reviewed step rather than
+    # something that happens the moment a pull request merges.
+    environment: landing-zone
+    defaults:
+      run:
+        working-directory: live/organization
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Assume the deployment role
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-landing-zone-apply
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - run: terraform init -backend-config=backend.hcl -input=false
+      - run: terraform apply -auto-approve -input=false
