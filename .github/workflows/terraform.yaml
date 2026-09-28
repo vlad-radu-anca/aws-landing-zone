@@ -28,6 +28,8 @@ jobs:
           - live/organization
           - modules/organization
           - modules/scp
+          - modules/identity-center
+          - modules/security-baseline
           - policies
     defaults:
       run:
